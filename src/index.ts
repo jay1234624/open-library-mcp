@@ -53,6 +53,35 @@ function jsonResult(data: unknown) {
   };
 }
 
+// Open Library sometimes stores descriptions as plain text or { value: "..." }
+function extractDescription(description: unknown): string | undefined {
+  if (typeof description === "string") {
+    return description;
+  }
+
+  if (
+    description &&
+    typeof description === "object" &&
+    "value" in description
+  ) {
+    return String((description as { value: unknown }).value);
+  }
+
+  return undefined;
+}
+
+// Pull the key metadata fields shared by summary and comparison tools
+function extractWorkFields(data: Record<string, unknown>) {
+  const subjects = data.subjects as string[] | undefined;
+
+  return {
+    title: data.title,
+    description: extractDescription(data.description),
+    subjects,
+    first_publish_date: data.first_publish_date,
+  };
+}
+
 server.registerTool(
   "search_books",
   {
@@ -178,6 +207,158 @@ server.registerTool(
     // Ratings are stored on works, not individual editions
     const data = await fetchOpenLibrary(`/works/${id}/ratings.json`);
     return jsonResult(data);
+  }
+);
+
+server.registerTool(
+  "search_authors",
+  {
+    description: "Search for authors by name on Open Library",
+    inputSchema: z.object({
+      query: z.string().describe("Author name to search, e.g. 'Tolkien'"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(25)
+        .optional()
+        .describe("Number of results to return (default 10, max 25)"),
+    }),
+  },
+  async ({ query, limit = 10 }) => {
+    const data = await fetchOpenLibrary(
+      `/search/authors.json?q=${encodeURIComponent(query)}&limit=${limit}`
+    );
+    return jsonResult(data);
+  }
+);
+
+server.registerTool(
+  "get_book_details_by_isbn",
+  {
+    description: "Retrieve detailed information for a book using its ISBN",
+    inputSchema: z.object({
+      isbn: z
+        .string()
+        .describe("ISBN-10 or ISBN-13, e.g. '9780547928227'"),
+    }),
+  },
+  async ({ isbn }) => {
+    const normalizedIsbn = isbn.trim().replace(/[-\s]/g, "");
+    const data = await fetchOpenLibrary(`/isbn/${normalizedIsbn}.json`);
+    return jsonResult(data);
+  }
+);
+
+server.registerTool(
+  "read_book_snippet",
+  {
+    description:
+      "Search inside books and return text snippets when available",
+    inputSchema: z.object({
+      query: z
+        .string()
+        .describe("Text to search for inside books, e.g. 'ring of power'"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Number of snippets to return (default 3, max 10)"),
+    }),
+  },
+  async ({ query, limit = 3 }) => {
+    const noSnippetsMessage =
+      "No text snippets were found for that query. Try different keywords or a more specific phrase.";
+
+    try {
+      const data = await fetchOpenLibrary(
+        `/search/inside.json?q=${encodeURIComponent(query)}&limit=${limit}`
+      );
+      const hits =
+        (data as { hits?: { hits?: Array<Record<string, unknown>> } }).hits
+          ?.hits ?? [];
+
+      if (hits.length === 0) {
+        return jsonResult({
+          message: noSnippetsMessage,
+          query,
+          snippets: [],
+        });
+      }
+
+      const snippets = hits.map((hit) => ({
+        text: (hit.highlight as { text?: string[] } | undefined)?.text ?? [],
+        score: hit._score,
+      }));
+
+      return jsonResult({
+        query,
+        count: snippets.length,
+        snippets,
+      });
+    } catch {
+      return jsonResult({
+        message: noSnippetsMessage,
+        query,
+        snippets: [],
+      });
+    }
+  }
+);
+
+server.registerTool(
+  "compare_books",
+  {
+    description:
+      "Compare two books side by side using their Open Library work IDs",
+    inputSchema: z.object({
+      workId1: z
+        .string()
+        .describe("First work ID, e.g. 'OL27448W' or '/works/OL27448W'"),
+      workId2: z
+        .string()
+        .describe("Second work ID, e.g. 'OL52267W' or '/works/OL52267W'"),
+    }),
+  },
+  async ({ workId1, workId2 }) => {
+    const id1 = normalizeId(workId1);
+    const id2 = normalizeId(workId2);
+
+    const [book1, book2] = await Promise.all([
+      fetchOpenLibrary(`/works/${id1}.json`),
+      fetchOpenLibrary(`/works/${id2}.json`),
+    ]);
+
+    return jsonResult({
+      book1: extractWorkFields(book1 as Record<string, unknown>),
+      book2: extractWorkFields(book2 as Record<string, unknown>),
+    });
+  }
+);
+
+server.registerTool(
+  "get_book_summary",
+  {
+    description:
+      "Get a concise summary of a book's metadata from its Open Library work ID",
+    inputSchema: z.object({
+      workId: z
+        .string()
+        .describe("Work ID, e.g. 'OL27448W' or '/works/OL27448W'"),
+    }),
+  },
+  async ({ workId }) => {
+    const id = normalizeId(workId);
+    const data = await fetchOpenLibrary(`/works/${id}.json`);
+    const work = data as Record<string, unknown>;
+    const subjects = work.subjects as string[] | undefined;
+
+    return jsonResult({
+      ...extractWorkFields(work),
+      number_of_subjects: subjects?.length ?? 0,
+    });
   }
 );
 
