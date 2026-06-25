@@ -14,6 +14,28 @@ function normalizeId(id: string): string {
   return id.replace(/^\//, "").split("/").pop() ?? id;
 }
 
+// Turn "Science Fiction" into "science_fiction" for the Subjects API
+function normalizeSubject(subject: string): string {
+  return subject.trim().toLowerCase().replace(/\s+/g, "_");
+}
+
+// Shared pagination limits used by list-style tools
+const paginationSchema = {
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe("Number of results to return (default 20, max 100)"),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Starting offset for pagination (default 0)"),
+};
+
 async function fetchOpenLibrary(path: string): Promise<unknown> {
   const url = `${OPEN_LIBRARY_BASE}${path}`;
   const response = await fetch(url);
@@ -94,6 +116,67 @@ server.registerTool(
   async ({ workId }) => {
     const id = normalizeId(workId);
     const data = await fetchOpenLibrary(`/works/${id}/editions.json?limit=20`);
+    return jsonResult(data);
+  }
+);
+
+server.registerTool(
+  "get_author_works",
+  {
+    description:
+      "Get the bibliography (list of works) for an author by Open Library author ID",
+    inputSchema: z.object({
+      authorId: z
+        .string()
+        .describe("Author ID, e.g. 'OL26320A' or '/authors/OL26320A'"),
+      ...paginationSchema,
+    }),
+  },
+  async ({ authorId, limit = 20, offset = 0 }) => {
+    const id = normalizeId(authorId);
+    const data = await fetchOpenLibrary(
+      `/authors/${id}/works.json?limit=${limit}&offset=${offset}`
+    );
+    return jsonResult(data);
+  }
+);
+
+server.registerTool(
+  "get_subject_insights",
+  {
+    description:
+      "Get books and trends for a subject/topic on Open Library (e.g. science_fiction)",
+    inputSchema: z.object({
+      subject: z
+        .string()
+        .describe("Subject name, e.g. 'science fiction' or 'science_fiction'"),
+      ...paginationSchema,
+    }),
+  },
+  async ({ subject, limit = 20, offset = 0 }) => {
+    const slug = normalizeSubject(subject);
+    const data = await fetchOpenLibrary(
+      `/subjects/${encodeURIComponent(slug)}.json?limit=${limit}&offset=${offset}`
+    );
+    return jsonResult(data);
+  }
+);
+
+server.registerTool(
+  "get_book_ratings",
+  {
+    description:
+      "Get aggregate reader ratings for a book work (average score and star counts)",
+    inputSchema: z.object({
+      workId: z
+        .string()
+        .describe("Work ID, e.g. 'OL27448W' or '/works/OL27448W'"),
+    }),
+  },
+  async ({ workId }) => {
+    const id = normalizeId(workId);
+    // Ratings are stored on works, not individual editions
+    const data = await fetchOpenLibrary(`/works/${id}/ratings.json`);
     return jsonResult(data);
   }
 );
